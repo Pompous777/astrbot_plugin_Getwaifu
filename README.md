@@ -83,3 +83,10 @@
 - AstrBot: https://github.com/AstrBotDevs/AstrBot
 - AstrBot 插件开发文档: https://docs.astrbot.app/dev/star/plugin-new.html
 - waifu.pics: https://waifu.pics/
+
+## 更新记录
+
+- `v1.1.1`
+  - 修复同一消息在短时间内被重复处理时，可能出现重复发送的问题。
+  - 优化图片发送入参格式，降低被适配器当作文本链接回显的概率。
+  - 统一插件内部注册版本与 `metadata.yaml` 版本号。

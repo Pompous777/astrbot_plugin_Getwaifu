@@ -91,13 +91,15 @@ COMMAND_ALIASES = (
 )
 
 
-@register("Getwaifu", "SleepIsAVerb", "@机器人并发送抽老婆时返回 SFW 图片", "1.0.0")
+@register("Getwaifu", "SleepIsAVerb", "@机器人并发送抽老婆时返回 SFW 图片", "1.1.1")
 class GetWaifuPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self._cache_dir = Path(tempfile.gettempdir()) / "astrbot_plugin_Getwaifu"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._last_cache_cleanup_at = 0.0
+        self._recent_event_keys: dict[str, float] = {}
+        self._event_dedupe_ttl_seconds = 8.0
 
     @staticmethod
     def _to_int(value) -> int | None:
@@ -134,6 +136,39 @@ class GetWaifuPlugin(Star):
         if bot_id is None:
             return True
         return bot_id in at_ids
+
+    def _event_key(self, event: AstrMessageEvent) -> str | None:
+        msg_obj = getattr(event, "message_obj", None)
+        candidates = [
+            getattr(msg_obj, "message_id", None),
+            getattr(event, "message_id", None),
+            getattr(msg_obj, "id", None),
+            getattr(event, "id", None),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            text = str(candidate).strip()
+            if text:
+                return text
+        return None
+
+    def _is_duplicate_event(self, event: AstrMessageEvent) -> bool:
+        event_key = self._event_key(event)
+        if not event_key:
+            return False
+
+        now = time.time()
+        expire_before = now - self._event_dedupe_ttl_seconds
+        self._recent_event_keys = {
+            key: ts for key, ts in self._recent_event_keys.items() if ts >= expire_before
+        }
+
+        if event_key in self._recent_event_keys:
+            return True
+
+        self._recent_event_keys[event_key] = now
+        return False
 
     @staticmethod
     def _http_get_json(url: str) -> dict:
@@ -237,12 +272,12 @@ class GetWaifuPlugin(Star):
             except Exception as exc:
                 logger.warning("cleanup cache file failed: %s, file=%s", exc, file_path)
 
-    def _fetch_and_cache_waifu_image(self, category: str) -> str:
+    def _fetch_and_cache_waifu_image(self, category: str) -> tuple[str, str]:
         self._cleanup_cache_files()
         image_url = self._fetch_waifu_url(category)
         image_path = self._download_image_to_cache(image_url)
         self._cleanup_cache_files()
-        return image_path
+        return image_path, image_url
 
     @filter.command("抽老婆", alias=COMMAND_ALIASES)
     async def draw_sfw_waifu(self, event: AstrMessageEvent):
@@ -252,10 +287,14 @@ class GetWaifuPlugin(Star):
 
         event.stop_event()
 
+        if self._is_duplicate_event(event):
+            logger.info("skip duplicate draw event")
+            return
+
         category = self._pick_category_from_text(event.message_str)
 
         try:
-            image_path = await asyncio.to_thread(self._fetch_and_cache_waifu_image, category)
+            image_path, image_url = await asyncio.to_thread(self._fetch_and_cache_waifu_image, category)
         except (URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
             logger.warning("Get waifu failed: %s", exc)
             yield event.plain_result("抽老婆失败了，接口当前不可达（可能是 DNS/网络限制），请稍后再试。")
@@ -268,4 +307,8 @@ class GetWaifuPlugin(Star):
         user_name = event.get_sender_name()
         category_name = CATEGORY_TO_NAME.get(category, category)
         yield event.plain_result(f"{user_name} 抽到了 {category_name}！")
-        yield event.image_result(image_path)
+        try:
+            yield event.image_result(image_path)
+        except Exception as exc:
+            logger.warning("send local image failed: %s, fallback to remote url", exc)
+            yield event.image_result(image_url)
